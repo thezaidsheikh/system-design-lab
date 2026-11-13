@@ -1,182 +1,83 @@
-# SD-01 · Vertical scaling (scale up)
+# SD-01 — Vertical Scaling lab
 
-System Design track ka pehla topic. Isse pehle ki hum load balancing, caching ya
-sharding padhein, ek sawaal ka jawab pakka hona chahiye: **scaling hota kya hai,
-aur system load badhne par achanak kyun girta hai?**
+**Question this lab answers:** vertical scaling sach me ho raha hai ya nahi — aur Python me use kaise dikhaye?
 
-## Scaling matlab kya — ek chai ki dukaan se samjho
+## 0. Is folder me do demos hain
 
-Ek chai ki dukaan hai. Ek banda (ek server) ek ghante me 60 cup bana sakta hai.
-Subah 9 baje 50 log aate hain — kaam chal raha hai. Phir dukaan famous ho gayi,
-200 log aane lage. Ab kya hoga? Line lagegi, log intezaar karenge, kuch bina chai
-piye chale jayenge, aur woh ek banda thak ke galtiyaan karega.
+- **`demo.py` (stdlib only, no install)** — queue simulation: load capacity se neeche, barabar, upar, phir badi machine par. Chalao: `python demo.py`. Tests: `python -m unittest test_demo -v` (6 tests).
+- **`app.py` + `loadtest.js` (real API + k6)** — asli FastAPI API aur k6 load test, 1 worker vs 4 workers. Yehi asli proof hai. Neeche section 2 se padho.
 
-System Design me isey kehte hain: **load (aane wali requests) tumhari capacity
-(ek time par handle karne ki taakat) se zyada ho gayi.** Scaling matlab capacity
-badhana taaki load sambhal jaye.
+## 1. Node.js se mapping — tumhara sawaal, seedha jawab
 
-## Queue kaise jamti hai — code se dekho
+Node.js by default single-threaded hota hai — ek process, ek core. `cluster` module se tum ek hi app ke multiple processes chalate ho, har process ek core use karta hai. Isi ko vertical scaling ke andar multi-process kehte hain.
 
-```python
-CAPACITY = 100          # requests per second (RPS)
-arriving = 250          # asal me aa rahi requests per second
+Python me wahi kaam **multiple worker processes** se hota hai. CPython me GIL hota hai — ek process ke andar threads CPU-bound kaam ko parallel nahi kar sakte. Isliye:
 
-queue = 0
-for second in range(1, 6):
-    queue += arriving - CAPACITY     # har second 150 line me khade
-    print(f"second {second}: line me khade = {queue}")
+- **Threads se fark nahi padega** CPU-bound endpoint par. Thread badhane se ek hi core use hota rahega.
+- **Workers/processes se fark padega.** `uvicorn --workers 4` matlab 4 alag Python processes, har ek apne core par. Yehi Python ka Node `cluster` ke barabar hai.
+- Gunicorn me wahi cheez `gunicorn -w 4 -k uvicorn.workers.UvicornWorker app:app` hoti hai.
+
+Vertical scaling ke do hisse hain, dono alag hain:
+1. **Bigger machine** — ek process ko zyada RAM/CPU dena. Isse CPU-bound kaam ki speed ek core tak badhti hai, uske baad nahi.
+2. **More processes on the same machine** — workers badhana. Isse multiple cores use hote hain. Yehi is lab me test karte hain.
+
+## 2. Lab — real API + k6 virtual users
+
+**API (`app.py`):** FastAPI, 3 endpoints.
+- `GET /health` — hamesha cheap, API up hai ya nahi check karne ke liye.
+- `GET /fast` — lagbhag zero CPU kaam. Control case: agar ye bhi slow ho, to bottleneck CPU nahi hai.
+- `GET /cpu` — jaan-bujh kar CPU-bound kaam (`hashlib.sha256` loop, 200,000 baar). Isi par 1 worker vs 4 workers ka fark dikhega.
+
+**Load test (`loadtest.js`):** k6, 50 virtual users, 10s ramp-up, 30s hold, 5s ramp-down. Virtual user matlab ek concurrent client jo baar-baar request karta hai — real browser nahi, par load ke liye wahi kaafi hai.
+
+## 3. Apne MacBook (M3, 8 GB RAM) par kaise chalaye
+
+Pehle check karo k6 hai ya nahi:
+```bash
+k6 version
+# nahi hai to: brew install k6
 ```
 
-Output:
-
-```text
-second 1: line me khade = 150
-second 2: line me khade = 300
-second 3: line me khade = 450
-second 4: line me khade = 600
-second 5: line me khade = 750
+Ek venv me install karo:
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install fastapi uvicorn
 ```
 
-Line = requests jo wait kar rahi hain. Line badhti hai to har nayi request ka
-intezaar badhta hai (latency), memory bharne lagti hai, timeouts aane lagte hain,
-aur users ko error dikhta hai. Dhyaan do — load badhne par system "thoda slow"
-nahi hota, woh ek point ke baad **achanak girta hai**.
-
-**Bottleneck** — system ka woh hissa jo sabse pehle full ho jata hai aur poore
-system ki speed tay karta hai. Yahan woh ek server ki CPU hai. Load badhne ki
-khabar user ki shikayat se nahi milni chahiye: CPU %, request latency aur queue
-length — ye metrics dekhna hi observability ki shuruaat hai.
-
-## Vertical scaling — wohi dukaan, ab bada aur tez banda
-
-Vertical scaling (scale up) matlab: **usi ek machine ko aur powerful bana do.**
-Zyada CPU cores, zyada RAM, tez SSD. Chai wali misaal me: wohi ek banda, par ab
-uske paas badi ketli, do burner wala stove, aur tez haath — ab woh 150 cup per
-ghanta bana sakta hai.
-
-```python
-server_v1 = {"cpu_cores": 2, "ram_gb": 8,  "capacity_rps": 100}
-server_v2 = {"cpu_cores": 8, "ram_gb": 32, "capacity_rps": 380}
-# load 250 RPS: v1 par "line lagegi", v2 par "sambhal gaya"
+**Round 1 — 1 worker:**
+```bash
+uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+# dusre terminal me:
+k6 run loadtest.js
 ```
 
-Dhyaan do: capacity 4 guna CPU par 4 guna nahi badhi (100 → 380). Hamesha aisa
-hi hota hai — har cheez CPU par hi nahi atki hoti; memory, disk, network bhi
-apni limit rakhte hain. Interview me ye line bolna: **"scaling linear nahi hoti."**
+**Round 2 — 4 workers:** pehle wali API band karo (Ctrl+C), phir:
+```bash
+uvicorn app:app --host 127.0.0.1 --port 8000 --workers 4
+k6 run loadtest.js
+```
 
-## Fayde — ye pehla kadam kyun hota hai
+Activity Monitor khula rakho — Round 1 me 1 Python process ~100% CPU (1 core) dikhega, Round 2 me 4 processes dikhenge.
 
-- **Code me zero change.** Wahi app, badi machine par. Na architecture badla, na
-  nayi complexity aayi.
-- **Data ka koi jhanjhat nahi.** Ek hi database, ek hi jagah — consistency apne
-  aap bani rehti hai.
-- **Solo/small team ke liye sahi shuruaat.** OpsPilot abhi ek modular monolith
-  hai — uske liye vertical hi sahi pehla jawab hai.
+## 4. Kya fark dikhna chahiye (expected result)
 
-## Deewaar — vertical scaling khatm kahan hota hai
-
-- **Ek hadd hai.** Duniya ki sabse badi machine bhi ek din chhoti padegi. Uske
-  aage koi "aur badi machine" hai hi nahi.
-- **Paise ki return ghat ti hai.** 2 se 4 core sasta padta hai; 64 se 128 core
-  behad mehenga — capacity utni nahi badhti jitna bill badhta hai.
-- **Single point of failure.** Ek hi machine hai — woh giri to sab gaya. Badi
-  machine bhi gir sakti hai.
-- **Upgrade ke time downtime.** Machine badalna matlab aksar app band karke
-  shift karna.
-
-Isi deewaar se agla topic paida hota hai: jab ek machine aur badi nahi ho sakti,
-to machines ki taadad badha do — woh hai **SD-02, horizontal scaling**.
-
-## Trade-offs — ek nazar me
-
-| | Vertical (scale up) | Horizontal (scale out, SD-02 preview) |
+| | 1 worker | 4 workers |
 |---|---|---|
-| Code change | Zero | Design badalna padta hai |
-| Data | Ek jagah, simple | Distribute karna padta hai |
-| Hadd | Ek machine ki limit | Bohot aage |
-| Failure | Ek machine giri = sab gaya | Ek giri to baaki chalti hain |
-| Cost | Bade sizes par mehenga hota jata hai | Chhoti machines, gradual |
+| `/cpu` requests/sec | low — 1 core saturate | ~3–4x zyada |
+| p95 latency | zyada, VUs badhne par aur badhega | clearly kam |
+| CPU use | 1 core ~100% | 4 cores use hote hain |
+| `/fast` | dono me fast | dono me fast (control case) |
 
-**Senior rule: pehle measure karo (bottleneck kahan hai?), phir sabse simple
-scaling jo kaam kare.** Bina measure kiye architecture badalna guess hai,
-engineering nahi.
+Ye approximate hai — M3 me 8 cores hain (4 performance + 4 efficiency), isliye 4 workers ke liye jagah hai. 8 workers mat lagana — 8 GB RAM par fayda nahi, context switching badhega.
 
-## OpsPilot par iska matlab — aaj ka decision
+Agar 1 worker aur 4 workers me koi fark na dikhe, to samjho endpoint CPU-bound nahi hai — phir `/cpu` ka loop badhana padega, ya phir test galat endpoint par chal raha hai. Yehi debugging hai.
 
-OpsPilot aaj ek modular monolith hai, ek machine par chal sakta hai. Sahi order:
+## 5. Interview me kaise bolna hai (30–40 sec)
 
-- Pehle vertical: jab users badhein, machine badi karo. Simple, sasta, code
-  waisa ka waisa.
-- Saath me metrics rakho: CPU, latency, queue — taaki deewaar dikhe, takraye nahi.
-- Jab vertical ki limit paas aaye, tab SD-02/SD-03 wale faisle: kaunsa hissa alag
-  machine par jayega (pehla candidate: background ingestion worker, kyunki woh
-  stateless hai — ye shabd SD-04 me khulega).
+> "Vertical scaling matlab ek hi machine ko powerful banana — zyada CPU, zyada RAM. Python me ek process GIL ki wajah se CPU-bound kaam ke liye ek core tak limited hai, isliye maine Uvicorn ke 4 workers chalaye, har worker ek alag process hai aur ek alag core use karta hai, bilkul Node ke cluster jaisa. Maine k6 se 50 virtual users se load test kiya — 1 worker par RPS low aur p95 high tha, 4 workers par RPS lagbhag 3–4x aur p95 clearly kam tha. Iska trade-off hai memory — har worker apni memory leta hai — aur iski limit hai, uske baad horizontal scaling chahiye hota hai."
 
-**ADR line (interview me bolne layak):** "We scale vertically first because the
-system is a modular monolith run by a small team; horizontal scaling is deferred
-until metrics show a specific bottleneck, and module boundaries keep that split
-possible later."
+## 6. Trade-offs
 
-## Demo chalana
-
-Koi package install nahi — sirf Python standard library. MacBook Air par halka
-chalega.
-
-```bash
-python topics/01-vertical-scaling/demo.py
-```
-
-Demo chaar scenario dikhata hai: load capacity ke neeche (smooth), capacity ke
-barabar (kinare par), capacity se upar (queue second-by-second badhti hui,
-latency phat ti hui), aur phir wahi load badi machine par (queue gayab). Har
-step ki table print hoti hai taaki fark aankhon se dikhe.
-
-Apne numbers se khelna ho to:
-
-```bash
-python topics/01-vertical-scaling/demo.py --capacity 100 --load 250 --seconds 5
-```
-
-Tests:
-
-```bash
-python -m unittest discover -s topics/01-vertical-scaling -v
-```
-
-## Interview Q&A — short version
-
-**Q: Scaling kya hoti hai, aur system load badhne par achanak kyun girta hai?**
-A: Scaling = capacity ko load ke hisaab se badhana. Capacity ke neeche system
-theek chalta hai; jaise hi arriving requests capacity se upar gayi, har second
-ek queue jama hoti hai, latency badhti hai, timeouts shuru hote hain — isiliye
-girawat achanak lagti hai. Queue khud khaali nahi hoti jab tak load capacity se
-neeche na aaye.
-
-**Q: Vertical scaling kya hai, aur uski limits kya hain?**
-A: Usi ek machine ko powerful banana — zyada CPU, RAM, tez disk — bina code
-badle. Limits: ek physical hadd hai, bade sizes par cost tez badhta hai par
-capacity utni nahi, machine single point of failure rehti hai, aur upgrade me
-aksar downtime aata hai.
-
-**Q: Tum vertical pehle kyun karoge, seedha horizontal kyun nahi?**
-A: Vertical me zero code change aur zero data complexity hai — chhoti team ke
-liye operational cost sabse kam. Horizontal tab justify hota hai jab metrics
-dikhayein ki vertical ki hadd paas hai ya availability chahiye. Pehle se
-distributed bana dena = bina wajah ki complexity.
-
-**Q: Bottleneck kaise pehchanoge ki scale karna hi padega?**
-A: Metrics se, andaze se nahi: CPU/memory saturation, p95 latency ka badhna,
-queue length ka jama hona, error/timeout rate. Jo resource sabse pehle full ho
-raha hai wahi bottleneck hai.
-
-**Q: CPU 4 guna kiya to capacity 4 guna kyun nahi badhi?**
-A: Request sirf CPU par nahi rukti — memory bandwidth, disk I/O, network, locks
-aur single-threaded hisse bhi limit rakhte hain. Scaling kabhi perfectly linear
-nahi hoti; isiliye load test karke asal capacity napte hain, spec sheet se
-andaza nahi lagate.
-
-**Q: OpsPilot ke liye tumhara scaling plan kya hai?**
-A: Abhi modular monolith ek machine par; pehla step vertical scaling + metrics.
-Jab bottleneck dikhe, sabse pehle stateless background worker (ingestion) ko
-alag karna horizontal ki taraf pehla kadam hoga — module boundaries isiliye
-saaf rakhi hain taaki ye split bina rewrite ke ho jaye.
+- Workers badhana free nahi hai — har worker apni RAM leta hai, 8 GB par 4 workers theek hain, 16 nahi.
+- Vertical scaling ki limit hoti hai — ek machine kitni bhi badi ho, ek point ke baad cost aur single point of failure badh jata hai. Tab horizontal scaling (SD-03) aata hai.
+- Threads I/O-bound kaam ke liye theek hain, CPU-bound ke liye nahi — yehi GIL ka practical matlab hai.
